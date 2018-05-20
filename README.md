@@ -36,13 +36,25 @@
 - [读写分离](#读写分离)
   - [mycat读写分离](#mycat读写分离)
 - [高可用](#高可用)
-  - [mha高可用(已经完成未更新文档)]
+  - [mha](#mha)
+    - [环境规划](#环境规划)
+    - [配置mha的一些前置备件](#配置mha的一些前置备件)
+    - [配置ansible的hosts文件](#配置ansible的hosts文件)
+    - [配置mysqltools中mha相关的配置项](#配置mysqltools中mha相关的配置项)
+    - [配置mha的相关信息](#配置mha的相关信息)
+    - [准备安装配置mha](#准备安装配置mha)
+    - [安装配置mha](#安装配置mha)
+    - [验证是否成功完成](#验证是否成功完成)
 - [备份](#备份)
   - [开发中](#开发中)
 - [巡检](#巡检)
   - [开发中]
 - [监控](#监控)
   - [目前已经实现的监控项](#目前已经实现的监控项)
+  - [监控项的人肉使用方法](#监控项的人肉使用方法)
+  - [zabbix监控环境介绍](#zabbix监控环境介绍)
+  - [zabbix监控环境安装规划](#zabbix监控环境安装规划)
+  - [安装用于保存监控数据的mysql数据库](#安装用于保存监控数据的mysql数据库)
 - [lnmp](#lnmp)
   - [安装mysql单机](#安装mysql单机)
   - [安装python](#安装python)
@@ -1263,6 +1275,327 @@
 
 ---
 
+
+## 高可用
+   **目前mysql高可用的开源解决方案中比较成熟的应该算mha了、相信不久的将来innodb cluster将会成为主流；mysqltools会把两者都包涵进来**
+
+   ---
+
+1. ## mha
+   **MHA是在mysql主从复制环境的基础上加的一套高可用软件、这套软件逻辑上又可以分成两个组件manager和node；其中manager负责监控master库是否存活，一旦master有问题就开大招做主从切换、切换中的一些脏活累活基本都由node来完；** 相关链接：https://www.cnblogs.com/gomysql/p/3675429.html
+
+   ---
+
+   1. ### 环境规划
+      **130、131、132三个实例组成一个mysql复制环境、其中130是master**
+      
+      |主机名    | ip地址          | 操作系统版本 | mysql角色| mha角色| vip              |
+      |---------|----------------|------------|---------|--------|------------------|
+      |mhamaster| 192.168.29.130 | centos-7.4 | master  | node   |192.168.29.100    |
+      |mhaslave1| 192.168.29.131 | centos-7.4 | slave   | node   |                  |
+      |mhaslave2| 192.168.29.132 | centos-7.4 | slave   | manager|                  |
+
+      ---
+
+   2. ### 配置mha的一些前置备件
+      **1、已经规范的安装配置了mysql复制环境、可以参考[mysql主从复制](#mysql主从复制)**
+
+      **2、各个主机之间都已经完成了ssh信任(mha会采用scp的方式从宕机的master主机上采集binlog日志、所以你事先要把ssh信任关系做好)**
+
+      **3、在安装配置的过程中有一些组件要用到gcc编译、mysqltools会去安装gcc gcc-c++ ，所以你要事先在这些主机上配置好yum**
+
+      ---
+
+   3. ### 配置ansible的hosts文件
+      **把要配置mha的几台主机作为一个组配置到/etc/ansible/hosts文件中去**
+      ```
+      [mhacluster]
+      mhamaster ansible_host=192.168.29.130 ansible_user=root
+      mhaslave1 ansible_host=192.168.29.131 ansible_user=root
+      mhaslave2 ansible_host=192.168.29.132 ansible_user=root
+      ```
+      ---
+
+   4. ### 配置mysqltools中mha相关的配置项
+      **mysqltools/config.yaml配置文件中有两项、是用来指明安装mha时所用的安装包的、默认值如下；用默认值就行一定不要改、除非你知道自己在做什么。**
+      ```
+      mtls_mha_node: mhanode.tar.gz
+      mtls_mha_manager: mhamanager.tar.gz
+      ```
+      ---
+
+   5. ### 配置mha的相关信息
+      **针对单个mha的详细配置都记录在了mysqltools/deploy/ansible/mha/vars/var_mha.yaml这个配置文件中了**
+      ```
+      master_ip: "192.168.29.130"
+      slave_ips:
+       - "192.168.29.131"
+       - "192.168.29.132"
+      
+      manager_ip: "192.168.29.132"
+      
+      net_work_interface: "ens33"
+      vip: "192.168.29.100"
+      
+      os_release: '7.4'
+
+      ```
+      1、master_ip 表示mysql master库所在主机的ip地址
+
+      2、slave_ips 表示mysql slave库的ip地址列表
+
+      3、manager_ip 表示mha manager要安装在主机ip、mysqltools希望你用最后一个slave的ip作为manger要安装的地方、mysqltools还会把第一个slave作为新的master
+
+      4、net_work_inferface 表示vip要绑定到的网卡
+
+      5、vip 表示vip地址
+
+      6、os_release 表示操作系统的版本、目前还只支持"7.4"这一个rhel版本
+
+      ---
+
+   6. ### 准备安装配置mha
+      **mysqltools/deploy/ansible/mha/install_mha.yaml文件中包涵了所有的步骤、修改文件中的host项以告诉ansible把这些步骤应用到哪些主机、根据上面的规划我要把hosts: 修改成如下内容**
+      ```
+      ---
+       - hosts: mhacluster
+      ```
+      也mhacluster这个组内的机器应用install_mha.yaml中定义的步骤
+
+      ---
+
+   7. ### 安装配置mha
+      ```
+      cd mysqltools/deploy/ansible/mha
+      ansible-playbook install_mha.yaml
+      ```
+      输出如下：
+      ```
+      PLAY [mhacluster] ********************************************************************
+      TASK [Gathering Facts] ***************************************************************
+      ok: [slave2]
+      ok: [slave1]
+      ok: [master]
+      TASK [install gcc] ********************************************************************
+      changed: [slave1]
+      changed: [slave2]
+      changed: [master]
+      TASK [install gcc-c++] ****************************************************************
+      changed: [slave2]
+      changed: [slave1]
+      changed: [master]
+      TASK [transfer mhanode.tar.gz to remote host and unarchive to /tmp/] ******************
+      changed: [master]
+      changed: [slave1]
+      changed: [slave2]
+      TASK [install mha node] ***************************************************************
+      changed: [master]
+      changed: [slave2]
+      changed: [slave1]
+      TASK [export path env to /root/.bashrc] ***********************************************
+      changed: [master]
+      changed: [slave2]
+      changed: [slave1]
+      TASK [stransfer create_mha_user.sql to master] ****************************************
+      skipping: [slave1]
+      skipping: [slave2]
+      changed: [master]
+      TASK [create mha user in mysql(master)] ***********************************************
+      skipping: [slave1]
+      skipping: [slave2]
+      changed: [master]
+      TASK [copy bind_vip.sh to /tmp/] ******************************************************
+      skipping: [slave1]
+      skipping: [slave2]
+      changed: [master]
+      TASK [bind vip] ***********************************************************************
+      skipping: [slave1]
+      skipping: [slave2]
+      changed: [master]
+      TASK [transfer mhamanager.tar.gz to remote host and unarchive to /tmp/] ***************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      TASK [install mha manager] ************************************************************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      TASK [create directory(/etc/masterha/)] ***********************************************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      TASK [create directory(/var/log/masterha)] *********************************************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      TASK [config mha app.cnf] ***************************************************************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      TASK [config master_ip_failover] ********************************************************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      TASK [config master_ip_online_change] ***************************************************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      TASK [copy start_mha.sh to /usr/local/] **************************************************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      TASK [start mha manager] *****************************************************************
+      skipping: [master]
+      skipping: [slave1]
+      changed: [slave2]
+      PLAY RECAP ********************************************************************************
+      master                     : ok=10   changed=9    unreachable=0    failed=0   
+      slave1                     : ok=6    changed=5    unreachable=0    failed=0   
+      slave2                     : ok=15   changed=14   unreachable=0    failed=0  
+      ```
+
+   8. ### 验证是否成功完成
+      **mysqltools在安装配置mha后并没有并没有把相关安装包直接删除、而是保留在了/tmp/mhanode /tmp/mhamanager 这两个目录下；目录下还包含用于验证结果的的脚本**
+
+      1、**验证master主机是否成功的绑定了vip**
+      ```
+      ifconfig
+      ```
+      输出如下：
+      ```
+      ens33: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+              inet 192.168.29.130  netmask 255.255.255.0  broadcast 192.168.29.255
+              inet6 fe80::413c:fcac:858:64bc  prefixlen 64  scopeid 0x20<link>
+              ether 00:0c:29:e3:07:d3  txqueuelen 1000  (Ethernet)
+              RX packets 10816  bytes 13581709 (12.9 MiB)
+              RX errors 0  dropped 0  overruns 0  frame 0
+              TX packets 2535  bytes 310584 (303.3 KiB)
+              TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+      
+      ens33:0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+              inet 172.16.192.100  netmask 255.255.0.0  broadcast 172.16.255.255
+              ether 00:0c:29:e3:07:d3  txqueuelen 1000  (Ethernet)
+      
+      lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
+              inet 127.0.0.1  netmask 255.0.0.0
+              inet6 ::1  prefixlen 128  scopeid 0x10<host>
+              loop  txqueuelen 1  (Local Loopback)
+              RX packets 203  bytes 29718 (29.0 KiB)
+              RX errors 0  dropped 0  overruns 0  frame 0
+              TX packets 203  bytes 29718 (29.0 KiB)
+              TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+      ```
+      ens33:0 已经绑上了192.168.29.100 这个vip、说明vip绑定成功了
+
+      ---
+
+      2、**验证mha-manager是否正常启动**
+      ```
+      ps -ef | grep man
+      ```
+      输出如下：
+      ```
+      root       3549      1  1 11:38 ?        00:00:00 perl /usr/local/bin//masterha_manager --conf=/etc/masterha/app.cnf --ignore_last_failover
+      ```
+      masterha_manager 这个进程存在说明manager已经成功启动(默认情况下日志保存在/var/log/masterha/manager.log你可以在这个日志看到更多的详细信息)
+
+      ---
+
+      **事实上完成上面的两项如果都成功了、那么你的mha就算配置成功了、但是为了排错的方便我还是在/tmp/mhamanager目录下留下了一些用于check脚本**
+
+      3、**检查ssh互信是否配置正确**
+      ```
+      cd /tmp/mhamanager/
+      ./check_ssh.sh 
+      ```
+      输出如下：
+      ```
+      Thu May 17 11:33:49 2018 - [warning] Global configuration file /etc/masterha_default.cnf not found. Skipping.
+      Thu May 17 11:33:49 2018 - [info] Reading application default configuration from /etc/masterha/app.cnf..
+      Thu May 17 11:33:49 2018 - [info] Reading server configuration from /etc/masterha/app.cnf..
+      Thu May 17 11:33:49 2018 - [info] Starting SSH connection tests..
+      Thu May 17 11:33:50 2018 - [debug] 
+      Thu May 17 11:33:49 2018 - [debug]  Connecting via SSH from root@192.168.29.130(192.168.29.130:22) to root@192.168.29.131(192.168.29.131:22)      ..
+      Thu May 17 11:33:49 2018 - [debug]   ok.
+      Thu May 17 11:33:49 2018 - [debug]  Connecting via SSH from root@192.168.29.130(192.168.29.130:22) to root@192.168.29.132(192.168.29.132:22)      ..
+      Thu May 17 11:33:50 2018 - [debug]   ok.
+      Thu May 17 11:33:50 2018 - [debug] 
+      Thu May 17 11:33:49 2018 - [debug]  Connecting via SSH from root@192.168.29.131(192.168.29.131:22) to root@192.168.29.130(192.168.29.130:22)      ..
+      Thu May 17 11:33:50 2018 - [debug]   ok.
+      Thu May 17 11:33:50 2018 - [debug]  Connecting via SSH from root@192.168.29.131(192.168.29.131:22) to root@192.168.29.132(192.168.29.132:22)      ..
+      Thu May 17 11:33:50 2018 - [debug]   ok.
+      Thu May 17 11:33:51 2018 - [debug] 
+      Thu May 17 11:33:50 2018 - [debug]  Connecting via SSH from root@192.168.29.132(192.168.29.132:22) to root@192.168.29.130(192.168.29.130:22)      ..
+      Thu May 17 11:33:50 2018 - [debug]   ok.
+      Thu May 17 11:33:50 2018 - [debug]  Connecting via SSH from root@192.168.29.132(192.168.29.132:22) to root@192.168.29.131(192.168.29.131:22)      ..
+      Thu May 17 11:33:51 2018 - [debug]   ok.
+      Thu May 17 11:33:51 2018 - [info] All SSH connection tests passed successfully.
+      ```
+      最后一行`All SSH connection tests passed successfully.`说明ssh信任是配置好了的
+
+      ---
+
+      4、**检查mysql 复制是否配置正确**
+      ```
+      cd /tmp/mhamanager/
+      ./check_repl.sh 
+      ```
+      输出如下：
+      ```
+      Thu May 17 11:33:24 2018 - [warning] Global configuration file /etc/masterha_default.cnf not found. Skipping.
+      Thu May 17 11:33:24 2018 - [info] Reading application default configuration from /etc/masterha/app.cnf..
+      Thu May 17 11:33:24 2018 - [info] Reading server configuration from /etc/masterha/app.cnf..
+      Thu May 17 11:33:24 2018 - [info] MHA::MasterMonitor version 0.57.
+      Thu May 17 11:33:25 2018 - [info] GTID failover mode = 1
+      Thu May 17 11:33:25 2018 - [info] Dead Servers:
+      Thu May 17 11:33:25 2018 - [info] Alive Servers:
+      Thu May 17 11:33:25 2018 - [info]   192.168.29.130(192.168.29.130:3306)
+      Thu May 17 11:33:25 2018 - [info]   192.168.29.131(192.168.29.131:3306)
+      Thu May 17 11:33:25 2018 - [info]   192.168.29.132(192.168.29.132:3306)
+      Thu May 17 11:33:25 2018 - [info] Alive Slaves:
+      Thu May 17 11:33:25 2018 - [info]   192.168.29.131(192.168.29.131:3306)  Version=5.7.22-log (oldest major version between slaves)       log-bin:enabled
+      Thu May 17 11:33:25 2018 - [info]     GTID ON
+      Thu May 17 11:33:25 2018 - [info]     Replicating from 192.168.29.130(192.168.29.130:3306)
+      Thu May 17 11:33:25 2018 - [info]     Primary candidate for the new Master (candidate_master is set)
+      Thu May 17 11:33:25 2018 - [info]   192.168.29.132(192.168.29.132:3306)  Version=5.7.22-log (oldest major version between slaves)       log-bin:enabled
+      Thu May 17 11:33:25 2018 - [info]     GTID ON
+      Thu May 17 11:33:25 2018 - [info]     Replicating from 192.168.29.130(192.168.29.130:3306)
+      Thu May 17 11:33:25 2018 - [info] Current Alive Master: 192.168.29.130(192.168.29.130:3306)
+      Thu May 17 11:33:25 2018 - [info] Checking slave configurations..
+      Thu May 17 11:33:25 2018 - [info]  read_only=1 is not set on slave 192.168.29.131(192.168.29.131:3306).
+      Thu May 17 11:33:25 2018 - [info]  read_only=1 is not set on slave 192.168.29.132(192.168.29.132:3306).
+      Thu May 17 11:33:25 2018 - [info] Checking replication filtering settings..
+      Thu May 17 11:33:25 2018 - [info]  binlog_do_db= , binlog_ignore_db= 
+      Thu May 17 11:33:25 2018 - [info]  Replication filtering check ok.
+      Thu May 17 11:33:25 2018 - [info] GTID (with auto-pos) is supported. Skipping all SSH and Node package checking.
+      Thu May 17 11:33:25 2018 - [info] Checking SSH publickey authentication settings on the current master..
+      Thu May 17 11:33:26 2018 - [info] HealthCheck: SSH to 192.168.29.130 is reachable.
+      Thu May 17 11:33:26 2018 - [info] 
+      192.168.29.130(192.168.29.130:3306) (current master)
+       +--192.168.29.131(192.168.29.131:3306)
+       +--192.168.29.132(192.168.29.132:3306)
+      
+      Thu May 17 11:33:26 2018 - [info] Checking replication health on 192.168.29.131..
+      Thu May 17 11:33:26 2018 - [info]  ok.
+      Thu May 17 11:33:26 2018 - [info] Checking replication health on 192.168.29.132..
+      Thu May 17 11:33:26 2018 - [info]  ok.
+      Thu May 17 11:33:26 2018 - [info] Checking master_ip_failover_script status:
+      Thu May 17 11:33:26 2018 - [info]   /usr/local/bin/master_ip_failover --command=status --ssh_user=root --orig_master_host=192.168.29.130       --orig_master_ip=192.168.29.130 --orig_master_port=3306 
+      
+      
+      IN SCRIPT TEST====/sbin/ifconfig ens33:0 down==/sbin/ifconfig ens33:0 172.16.192.100===
+      
+      Checking the Status of the script.. OK 
+      Thu May 17 11:33:26 2018 - [info]  OK.
+      Thu May 17 11:33:26 2018 - [warning] shutdown_script is not defined.
+      Thu May 17 11:33:26 2018 - [info] Got exit code 0 (Not master dead).
+      
+      MySQL Replication Health is OK.
+      ```
+      最后一行`MySQL Replication Health is OK.`说明mysql复制是正常的
+      ---
+      
+
 ## 监控
    **mysqltools的出发点是以提升生产力为目标的、但凡能用电解决的事、就不要动用人力;我们的目标是认机器检测到问题后尽可能的自动解决掉它、解决完成后发个通知就行。这一切的基础是要有一套完善的监控系统，mysqltools在这方面使用的是zabbix这个开源解决方案。**
    1. ### 目前已经实现的监控项
@@ -1430,11 +1763,169 @@
       |`-- MgrTransactionsCommittedAllMembers`|当前mgr成员上已经应用的事务总数量                            | p_s    |
 
       ---
-   2. ### zabbix监控环境的介绍
 
+   2. ### 监控项的人肉使用方法
+      MySQL相关监控项的采集脚本为**mysqltools/mysqltoolsclient/monitor.py**  它是一个python3风格的脚本、所以如果你想成功的运行它那么你就要安装好python3的环境；好消息是mysqltools有python3自动化安装的功能(见[安装python](#安装python))；安装好python3后把**mysqltools/mysqltoolsclient**目录复制到你要监控的目标主机就
 
+      ```
+      ./monitor.py --user=monitor --password=monitor0352 --host=127.0.0.1 --port=3306 BinlogCacheDiskUse
+      ```
+      输出如下
+      ```
+      0
+      ```
+
+      ---
+
+   3. ### zabbix监控环境介绍
+      **zabbix采用的是server/agent的架构设计，agent负责采集数据、数据经由可选的proxy(也就是说可以不经过proxy)上报到server；数据最终是保存到数据库中的、这里后台的数据库我选择用mysql；为了方便使用zabbix还自带了一个用php写的网站，这样用户就可以通过web界面来配置监控系统了，体验上来说要好不少。网站不直接与server交互它直接操作数据。**
+
+      **从软件组件上看一套zabbix监控环境涉及到多少组件**
+      
+      1): **linux** 主机    2): **apache(httpd)**   3): **mysql**   4): **php**   5):**zabbix-server**   6):**zabbix-agent**   7): **zabbix-proxy** 
+      
+      从涉及到的组件上看一个监控环境是比较复杂的；mysqltools自动化安装的默认行为是在zabbix-server主机上同时安装上mysql、apache(httpd)、php 当然为了有监控zabbix-server所在主机的能力mysqltools还会在zabbix-server主机上也安装上zabbix-agent
+
+      ---
+
+   4. ### zabbix监控环境安装规划
+
+      **安装规划**
+
+      主机名     | ip地址          | 角色
+      ----------|----------------|-----
+      sqlstudio | 172.16.192.101 | zabbix-server
+      mysqldb   | 172.16.192.128 | zabbix-agent
+
+      ---
+
+   5. ### 安装用于保存监控数据的mysql数据库
+      **mysql-8.0.xx 还刚出来；我在使用mysql-8.0.11这个版本时编译php出错了；最好还在这里用mysql-5.7.x版本的mysql**
+      见([mysql单机](#mysql单机))
+
+      ---
+
+   6. ### 改配置文件中zabbix_server_ip这个配置项
+      **修改mysqltools/config.yaml配置文件中的zabbix_server_ip配置项的值为zabbix-server主机的ip地址**
+      ```
+      zabbix_server_ip: 172.16.192.101
+      ```
+
+      ---
+
+   7. ### 安装httpd
+      **1):进入httpd的安装目录**
+      ```
+      cd mysqltools/deploy/ansible/httpd
+      ```
+      **2):修改install_httpd.yaml文件中的目标主机为zabbixstudio**
+      ```
+      ---
+        - hosts: zabbixstudio
+          vars_files:
+      ```
+      **3):安装httpd**
+      ```
+      ansible-playbook install_httpd.yaml
+      ```
+      输出如下：
+      ```
+      PLAY [zabbixstudio] ***********************************************************************************************************
+      
+      TASK [Gathering Facts] ********************************************************************************************************
+      ok: [zabbixstudio]
+      
+      TASK [install gcc] ************************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install gcc-c++] ********************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install pcre-devel] *****************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [openssl-devel] **********************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [expat-devel] ************************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [perl] *******************************************************************************************************************
+      ok: [zabbixstudio]
+      
+      TASK [transfer apr-1.6.2.tar.gz to remote host] *******************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [copy install script to remote] ******************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install apr] ************************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [remove /tmp/install_apr.sh] *********************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [remove /tmp/apr-1.6.2] **************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [transfer apr-util-1.6.0.tar.gz to remote host] **************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [copy install script to remote] ******************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install apr_util] *******************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [clear /tmp/ directory] **************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [clear /tmp/ directory] **************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [copy httpd-2.4.28.tar.gz to remonte host] *******************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [copy install scripts to remonte host] ***********************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install httpd] **********************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [remove /tmp/install_httpd.sh] *******************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [remove /tmp/httpd-2.4.28.tar.gz] ****************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [config httpd.service] ***************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [start httpd.service] ****************************************************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [enable httpd.service] ***************************************************************************************************
+      changed: [zabbixstudio]
+      
+      PLAY RECAP ********************************************************************************************************************
+      zabbixstudio               : ok=25   changed=23   unreachable=0    failed=0
+      ```
+      **4):查看目标主机上的httpd进行种是否已经启动**
+      ```
+      ps -ef | grep httpd                                                                   
+      root      38860      1  0 15:11 ?        00:00:00 /usr/local/httpd/bin/httpd -DFOREGROUND                    
+      daemon    38861  38860  0 15:11 ?        00:00:00 /usr/local/httpd/bin/httpd -DFOREGROUND                    
+      daemon    38862  38860  0 15:11 ?        00:00:00 /usr/local/httpd/bin/httpd -DFOREGROUND                    
+      daemon    38863  38860  0 15:11 ?        00:00:00 /usr/local/httpd/bin/httpd -DFOREGROUND                    
+      daemon    43716  38860  0 15:15 ?        00:00:00 /usr/local/httpd/bin/httpd -DFOREGROUND  
+      ```
+      **5):通过浏览器查看效果**
+      <img src="./docs/imgs/httpd-0001.png"/>
+
+   8. ### 安装php
 ## lnmp
    **lnmp指的是:** linux + nginx + mysql + python 可以用这些组件来搭建django框架写成的网站；(我们将在一台机器上集齐所有组件)
+
    **主机名**     | **ip地址**          | **系统版本**  |   软件       |
    -------------:|:-------------------|--------------|-------------|
    uwsgiweb      | 172.16.192.133     |centos-7.4    | linux + nginx + mysql + python3.6.x + uwsgi + django |
