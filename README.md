@@ -33,6 +33,7 @@
   - [mysql主从复制](#mysql主从复制)
   - [mysql多源复制](#mysql多源复制)
   - [mysql组复制](#mysql组复制)
+  - [mysql小版本升级](#mysql小版本升级)
 - [读写分离](#读写分离)
   - [mycat读写分离](#mycat读写分离)
 - [高可用](#高可用)
@@ -55,6 +56,9 @@
   - [zabbix监控环境介绍](#zabbix监控环境介绍)
   - [zabbix监控环境安装规划](#zabbix监控环境安装规划)
   - [安装用于保存监控数据的mysql数据库](#安装用于保存监控数据的mysql数据库)
+  - [改配置文件中zabbix_server_ip这个配置项](#改配置文件中zabbix_server_ip这个配置项)
+  - [安装httpd](#安装httpd)
+  - [安装zabbix服务端](#安装zabbix服务端)
 - [lnmp](#lnmp)
   - [安装mysql单机](#安装mysql单机)
   - [安装python](#安装python)
@@ -1134,6 +1138,104 @@
 
       ---
 
+   5. ### mysql小版本升级
+      **mysqltools为版本升级提供了支持，如果你想使用这个功能，那么你要清楚的知道自己在干什么**
+
+      1、小版本升级并不会去执行`mysql_upgrade`脚本，这个主要是由于mysqltools诞生环境比较特别，单个实例的数据量是以`TB`来衡量的，在这种量级的情况下`mysql_upgrade`可以能执行几天才能完成，所以你懂的
+
+      **1):修改upgrad_single_mysql.yaml文件的hosts 变量为你要升级的目标主机**
+
+      ```
+      ---
+       - hosts: sqlstudio
+      ```
+      ---
+
+      **2):执行升级程序**
+      ```
+      ansible-playbook upgrad_single_mysql.yaml
+      ```
+      输出如下：
+      ```
+      PLAY [sqlstudio] **************************************************************************************************************
+      
+      TASK [Gathering Facts] ********************************************************************************************************
+      ok: [sqlstudio]
+      
+      TASK [stop mysql service] *****************************************************************************************************
+      ok: [sqlstudio]
+      
+      TASK [backup link file] *******************************************************************************************************
+      changed: [sqlstudio]
+      
+      TASK [unarchive new package to /usr/local/] ***********************************************************************************
+      changed: [sqlstudio]
+      
+      TASK [change owner and group] *************************************************************************************************
+      changed: [sqlstudio]
+      
+      TASK [make new link file] *****************************************************************************************************
+      changed: [sqlstudio]
+      
+      TASK [start mysql service] ****************************************************************************************************
+      changed: [sqlstudio]
+      
+      PLAY RECAP ********************************************************************************************************************
+      sqlstudio                  : ok=7    changed=5    unreachable=0    failed=0
+      ```
+
+      ---
+
+      **3):查看升级是否成功**
+      
+      1、看/usr/local/下的变化
+
+      **升级前**
+      ```
+      drwxr-xr-x   9 mysql mysql 129 6月  18 14:46 mysql-5.7.21-linux-glibc2.12-x86_64
+      lrwxrwxrwx   1 root  root   35 6月  18 14:53 mysql -> mysql-5.7.21-linux-glibc2.12-x86_64
+      ```
+      **升级后**
+      ```
+      lrwxrwxrwx   1 mysql mysql  46 6月  18 15:30 mysql -> /usr/local/mysql-5.7.22-linux-glibc2.12-x86_64
+      drwxr-xr-x   9 mysql mysql 129 6月  18 14:46 mysql-5.7.21-linux-glibc2.12-x86_64
+      drwxr-xr-x   9 mysql mysql 129 6月  18 15:30 mysql-5.7.22-linux-glibc2.12-x86_64
+      lrwxrwxrwx   1 root  root   35 6月  18 14:53 mysql.backup.20180618 -> mysql-5.7.21-linux-glibc2.12-x86_64
+      ```
+
+      ---
+
+      2、连接进数据库进行检察
+      ```
+      mysql -uroot -pxxxxxx
+      ```
+
+      ```                                                              
+      mysql: [Warning] Using a password on the command line interface can be insecure.
+      Welcome to the MySQL monitor.  Commands end with ; or \g.
+      Your MySQL connection id is 3
+      Server version: 5.7.22-log MySQL Community Server (GPL)
+      
+      Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+      
+      Oracle is a registered trademark of Oracle Corporation and/or its
+      affiliates. Other names may be trademarks of their respective
+      owners.
+      
+      Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+      
+      mysql>select @@version;
+      +------------+
+      | @@version  |
+      +------------+
+      | 5.7.22-log |
+      +------------+
+      1 row in set (0.00 sec)
+      ```
+
+      ---
+
+ 
 ## 读写分离
    本来这里是要加入分库分表的功能的、因为用yaml难以表达mycat的相关配置、最终我还是放弃了、所以目前mysqltools还只有自动化安装配置mycat读写分离的功能
 
@@ -1457,7 +1559,7 @@
    8. ### 验证是否成功完成
       **mysqltools在安装配置mha后并没有并没有把相关安装包直接删除、而是保留在了/tmp/mhanode /tmp/mhamanager 这两个目录下；目录下还包含用于验证结果的的脚本**
 
-      1、**验证master主机是否成功的绑定了vip**
+      **1、验证master主机是否成功的绑定了vip**
       ```
       ifconfig
       ```
@@ -1489,7 +1591,7 @@
 
       ---
 
-      2、**验证mha-manager是否正常启动**
+      **2、验证mha-manager是否正常启动**
       ```
       ps -ef | grep man
       ```
@@ -1503,7 +1605,7 @@
 
       **事实上完成上面的两项如果都成功了、那么你的mha就算配置成功了、但是为了排错的方便我还是在/tmp/mhamanager目录下留下了一些用于check脚本**
 
-      3、**检查ssh互信是否配置正确**
+      **3、检查ssh互信是否配置正确**
       ```
       cd /tmp/mhamanager/
       ./check_ssh.sh 
@@ -1535,7 +1637,7 @@
 
       ---
 
-      4、**检查mysql 复制是否配置正确**
+      **4、检查mysql 复制是否配置正确**
       ```
       cd /tmp/mhamanager/
       ./check_repl.sh 
@@ -1592,7 +1694,9 @@
       
       MySQL Replication Health is OK.
       ```
+
       最后一行`MySQL Replication Health is OK.`说明mysql复制是正常的
+      
       ---
       
 
@@ -1923,6 +2027,183 @@
       <img src="./docs/imgs/httpd-0001.png"/>
 
    8. ### 安装php
+      **1):进入php的安装目录**
+      ```
+      cd mysqltools/deploy/ansible/php
+      ```
+      ---
+
+      **2):修改install_php.yaml文件中的目标主机为zabbixstudio**
+      ```
+      ---
+        - hosts: zabbixstudio
+          vars_files:
+      ```
+
+      ---
+      **3):安装php**
+      ```
+      ansible-playbook install_php.yaml 
+      ```
+      输出如下：
+      ```
+      PLAY [zabbixstudio] ************************************************************
+      
+      TASK [Gathering Facts] *********************************************************
+      ok: [zabbixstudio]
+      
+      TASK [install gcc] *************************************************************
+      ok: [zabbixstudio]
+      
+      TASK [install gcc-c++] *********************************************************
+      ok: [zabbixstudio]
+      
+      TASK [install bzip2-devel] *****************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install libjpeg-devel] ***************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install libpng-devel] ****************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install freetype-devel] **************************************************
+      changed: [zabbixstudio]
+      
+      TASK [install freetype-devel] **************************************************
+      changed: [zabbixstudio]
+      
+      TASK [stop httpd.service] ******************************************************
+      changed: [zabbixstudio]
+      
+      TASK [unarchive php-5.6.31.tar.gz to remonte host] *****************************
+      changed: [zabbixstudio]
+      
+      TASK [copy install_php.sh to remonte host] *************************************
+      changed: [zabbixstudio]
+      
+      TASK [install php] *************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [copy php.ini to remote] **************************************************
+      changed: [zabbixstudio]
+      
+      TASK [remove /usr/local/httpd/htdocs/index.html] *******************************
+      changed: [zabbixstudio]
+      
+      TASK [copy index.php to remote] ************************************************
+      changed: [zabbixstudio]
+      
+      TASK [remove /tmp/install_php.sh] **********************************************
+      changed: [zabbixstudio]
+      
+      TASK [remove /tmp/php-5.6.31] **************************************************
+      changed: [zabbixstudio]
+      
+      TASK [config httpd] ************************************************************
+      changed: [zabbixstudio]
+      
+      TASK [start httpd.service] *****************************************************
+      changed: [zabbixstudio]
+      
+      PLAY RECAP *********************************************************************
+      zabbixstudio               : ok=19   changed=16   unreachable=0    failed=0   
+      ```
+      ---
+
+      **4):通过web页面查看是否安装成功**
+      <img src="./docs/imgs/php-0001.png"/>
+
+      ---
+
+   9. ### 安装zabbix服务端
+      **1):配置mysqltools/config.yaml**
+
+      mysqltools配置文件中的`zabbix_server_ip: xxx.xxx.xxx.xxx`用来指定zabbix_server主机的ip地址，这个地址会在zabbix_agent的配置文件中用到，由于zabbix_server所在的主机也是要监控的，所以在zabbix_server主机上也要安装上zabbix_agent。此外，为了方安装mysqltools会自动在zabbix_server所在的主机上安装上zabbix_agent。
+      根据上面规划提到的zabbix_server在172.16.192.101这个主机上，所以config.yaml的内容应该如下
+      ```
+      zabbix_server_ip: 172.16.192.101
+      ```
+      ---
+
+      **2):修改install_zabbix_server.yaml文件中的目标主机为zabbixstudio**
+      ```
+      ---
+        - hosts: zabbixstudio
+          vars_files:
+      ```
+
+      ---
+
+      **3):安装zabbix_server**
+      
+      ```
+      cd mysqltools/deploy/ansible/zabbix
+      ansible-playbook install_zabbix_server.yaml
+      ```
+      输出如下：
+      ```
+      PLAY [zabbixstudio] ***********************************************************************************************************
+      
+      TASK [Gathering Facts] ********************************************************************************************************
+      ok: [zabbixstudio]
+      
+      TASK [add zabbix user to system] **********************************************************************************************
+      changed: [zabbixstudio]
+      ....
+      
+      TASK [config zabbix_server start up on boot] **********************************************************************************
+      changed: [zabbixstudio]
+      
+      PLAY RECAP ********************************************************************************************************************
+      zabbixstudio               : ok=32   changed=26   unreachable=0    failed=0 
+      ```
+
+      ---
+
+      **4):通过web配置zabbix**
+
+      1、访问zabbix-web界面 
+
+      <img src="./docs/imgs/zabbix-0001.png"/>
+
+      ---
+
+      2、下一步
+
+      <img src="./docs/imgs/zabbix-0002.png"/>
+
+      ---
+
+      3、配置zabbix管理界面连接后台数据库的方式
+
+      <img src="./docs/imgs/zabbix-0003.png"/>
+      这里的password指的是数据库端zabbix用户的密码、这个东西引用的是config.yaml中的`mysql_zabbix_password`这个配置项
+
+      然后就一直点“next step ”
+
+      ---
+
+      4、登录到zabbix-web
+
+      <img src="./docs/imgs/zabbix-0004.png"/>
+
+      这里的账号密码是死的，账号名：`admin` 密码：`zabbix`
+
+      5、zabbix-web 主页
+
+      <img src="./docs/imgs/zabbix-0005.png"/>
+
+      
+
+
+
+
+   10. ###
+      
+
+
+
 ## lnmp
    **lnmp指的是:** linux + nginx + mysql + python 可以用这些组件来搭建django框架写成的网站；(我们将在一台机器上集齐所有组件)
 

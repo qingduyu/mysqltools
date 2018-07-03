@@ -14,7 +14,7 @@
       when: ansible_distribution_major_version == "7"
       systemd:
        name: httpd
-       state: started
+       state: stopped
 
     - name: remove /usr/local/httpd/htdocs/index.html
       file:
@@ -24,9 +24,17 @@
     - import_tasks: common/install_dependents.yaml
 
     - import_tasks: common/install_server_node.yaml
+
+    - import_tasks: common/config_monitor_script.yaml 
       
     - name: config zabbix-server
       import_tasks: ./common/config_zabbix_server_service.yaml
     
     - name: config zabbix-agent
       import_tasks: common/config_zabbix_agent_service.yaml
+
+    - name: start httpd(linux-7)
+      when: ansible_distribution_major_version == "7"
+      systemd:
+       name: httpd
+       state: started
